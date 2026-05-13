@@ -2,7 +2,7 @@
   "name": "opencode-jupyter",
   "displayName": "OpenCode Jupyter",
   "description": "Bridge OpenCode with Jupyter notebooks in VS Code via MCP",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "KrisspyWang",
   "license": "MIT",
   "repository": {
