@@ -3,8 +3,12 @@
   "displayName": "OpenCode Jupyter",
   "description": "Bridge OpenCode with Jupyter notebooks in VS Code via MCP",
   "version": "0.1.0",
-  "publisher": "opencode",
+  "publisher": "KrisspyWang",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KrisspyWang/opencode-jupyter.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
