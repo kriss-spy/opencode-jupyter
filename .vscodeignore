@@ -1,0 +1,12 @@
+.vscodeignore
+.gitignore
+.git/**
+src/**
+tsconfig.json
+skills-lock.json
+.agents/**
+**/*.docx
+**/*.vsix
+node_modules/**
+.vscode-test/**
+.vscode/**
