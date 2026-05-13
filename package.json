@@ -1,0 +1,79 @@
+{
+  "name": "opencode-jupyter",
+  "displayName": "OpenCode Jupyter",
+  "description": "Bridge OpenCode with Jupyter notebooks in VS Code via MCP",
+  "version": "0.1.0",
+  "publisher": "opencode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Data Science",
+    "Notebooks"
+  ],
+  "keywords": [
+    "jupyter",
+    "notebook",
+    "opencode",
+    "mcp",
+    "ai"
+  ],
+  "activationEvents": [
+    "onNotebook:jupyter-notebook"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "opencode-jupyter.startServer",
+        "title": "Start OpenCode Jupyter MCP Server",
+        "category": "OpenCode Jupyter"
+      },
+      {
+        "command": "opencode-jupyter.stopServer",
+        "title": "Stop OpenCode Jupyter MCP Server",
+        "category": "OpenCode Jupyter"
+      },
+      {
+        "command": "opencode-jupyter.showMcpConfig",
+        "title": "Show MCP Configuration",
+        "category": "OpenCode Jupyter"
+      }
+    ],
+    "configuration": {
+      "title": "OpenCode Jupyter",
+      "properties": {
+        "opencode-jupyter.mcpPort": {
+          "type": "number",
+          "default": 9123,
+          "description": "Port for the local MCP HTTP server"
+        },
+        "opencode-jupyter.autoStartServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the MCP server when a notebook is opened"
+        }
+      }
+    }
+  },
+  "extensionDependencies": [
+    "ms-toolsai.jupyter"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "@vscode/vsce": "^2.15.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5"
+  }
+}
