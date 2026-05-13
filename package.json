@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/KrisspyWang/opencode-jupyter.git"
+    "url": "https://github.com/kriss-spy/opencode-jupyter.git"
   },
   "engines": {
     "vscode": "^1.90.0"
