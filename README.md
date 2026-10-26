@@ -1,6 +1,7 @@
 # OpenCode Jupyter
 
 [![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/KrisspyWang.opencode-jupyter)](https://marketplace.visualstudio.com/items?itemName=KrisspyWang.opencode-jupyter)
+[![OpenCode](https://img.shields.io/badge/OpenCode-MCP-8A2BE2)](https://opencode.ai)
 
 Operate Jupyter notebooks open in VS Code from OpenCode or another MCP client. The extension runs a loopback MCP server in the VS Code workspace extension host.
 
