@@ -144,3 +144,8 @@ vite.config.ts.timestamp-*
 
 *.vsix
 .DS_Store
+
+opencode.json
+./opencode/
+artifacts/
+THIRD_PARTY_NOTICES.txt

@@ -1,377 +1,180 @@
-import { JupyterApi, NotebookCellInfo, KernelVariable } from './jupyterApi';
-import { SseTransport, JSONRPCMessage } from './sseTransport';
+import * as http from 'node:http';
+import { randomUUID } from 'node:crypto';
+import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { NotebookOperations } from './jupyterApi';
+import { createToolServer } from './tools';
 
-interface Tool {
-  name: string;
-  description: string;
-  inputSchema: object;
-}
-
-interface ToolCallResult {
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
-}
-
-const TOOLS: Tool[] = [
-  {
-    name: 'jupyter_list_open_notebooks',
-    description: 'List all currently open Jupyter notebooks in VS Code, with their URIs and cell counts. Useful when no notebook is "active" but one is open.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-    },
-  },
-  {
-    name: 'jupyter_get_notebook',
-    description: 'Get the full content of the active or specified Jupyter notebook, including all cells, their source code, and outputs.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-    },
-  },
-  {
-    name: 'jupyter_run_cell',
-    description: 'Execute a specific cell in a Jupyter notebook by its index and return the updated cell with outputs.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        index: {
-          type: 'number',
-          description: 'Zero-based index of the cell to execute.',
-        },
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-      required: ['index'],
-    },
-  },
-  {
-    name: 'jupyter_insert_cell',
-    description: 'Insert a new cell into a Jupyter notebook at the specified index.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        index: {
-          type: 'number',
-          description: 'Zero-based index where the new cell should be inserted.',
-        },
-        kind: {
-          type: 'string',
-          enum: ['code', 'markdown'],
-          description: 'Type of cell to insert.',
-        },
-        source: {
-          type: 'string',
-          description: 'Source content of the new cell.',
-        },
-        language: {
-          type: 'string',
-          description: 'Language identifier (e.g., python). Defaults to python for code cells.',
-        },
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-      required: ['index', 'kind', 'source'],
-    },
-  },
-  {
-    name: 'jupyter_edit_cell',
-    description: 'Modify the source content of an existing cell in a Jupyter notebook.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        index: {
-          type: 'number',
-          description: 'Zero-based index of the cell to edit.',
-        },
-        source: {
-          type: 'string',
-          description: 'New source content for the cell.',
-        },
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-      required: ['index', 'source'],
-    },
-  },
-  {
-    name: 'jupyter_get_variables',
-    description: 'Query the current kernel variables for a Jupyter notebook.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-    },
-  },
-  {
-    name: 'jupyter_get_errors',
-    description: 'Get all cells in a Jupyter notebook that have error outputs.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-    },
-  },
-  {
-    name: 'jupyter_restart_kernel',
-    description: 'Restart the kernel for a Jupyter notebook.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-    },
-  },
-  {
-    name: 'jupyter_get_kernel_status',
-    description: 'Get the current kernel status (idle or busy) for a Jupyter notebook.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        uri: {
-          type: 'string',
-          description: 'Optional URI of the notebook. If omitted, uses the active notebook.',
-        },
-      },
-    },
-  },
-];
+const BODY_LIMIT = 1024 * 1024;
+const SESSION_LIMIT = 32;
+const SESSION_IDLE_MS = 30 * 60 * 1000;
+type Session = { server: Server; transport: StreamableHTTPServerTransport | SSEServerTransport; touched: number };
 
 export class McpServerManager {
-  private transport?: SseTransport;
-  private requestId = 0;
+  private httpServer?: http.Server;
+  private sessions = new Map<string, Session>();
+  private connections = new Set<Session>();
+  private timer?: NodeJS.Timeout;
+  private queue: Promise<unknown> = Promise.resolve();
+  private phase: 'stopped' | 'starting' | 'running' | 'stopping' = 'stopped';
 
-  constructor(
-    private jupyterApi: JupyterApi,
-    private port: number
-  ) {}
-
-  async start(): Promise<void> {
-    if (this.transport) {
-      throw new Error('MCP server is already running');
-    }
-
-    this.transport = new SseTransport(this.port);
-    this.transport.onMessage((message) => this.handleMessage(message));
-
-    await this.transport.start();
-
-    // Send initialization notification to all connected clients
-    await this.sendNotification('notifications/tools/list_changed', {});
+  constructor(private readonly api: NotebookOperations, private readonly port: number, private readonly version: string) {}
+  get state() { return this.phase; }
+  getEndpoint() {
+    const address = this.httpServer?.address();
+    return `http://127.0.0.1:${address && typeof address === 'object' ? address.port : this.port}`;
   }
-
-  async stop(): Promise<void> {
-    if (this.transport) {
-      await this.transport.close();
-      this.transport = undefined;
-    }
+  private enqueue(task: () => Promise<void>) {
+    const next = this.queue.then(task);
+    this.queue = next.catch(() => undefined);
+    return next;
   }
+  start(): Promise<void> { return this.enqueue(() => this.startNow()); }
+  stop(): Promise<void> { return this.enqueue(() => this.stopNow()); }
 
-  getEndpoint(): string {
-    return `http://localhost:${this.port}`;
-  }
-
-  private async handleMessage(message: JSONRPCMessage): Promise<void> {
-    if (!message.method || message.method.startsWith('notifications/')) {
-      return;
-    }
-
-    const id = message.id;
-
+  private async startNow() {
+    if (this.phase === 'running') { return; }
+    if (!Number.isInteger(this.port) || this.port < 0 || this.port > 65535) { throw new Error('Invalid MCP port.'); }
+    this.phase = 'starting';
+    const server = http.createServer((req, res) => {
+      void this.route(req, res).catch(() => { if (!res.headersSent) { this.reply(res, 500, 'MCP request failed.'); } else { res.end(); } });
+    });
+    server.requestTimeout = 15000;
+    server.headersTimeout = 10000;
+    this.httpServer = server;
     try {
-      switch (message.method) {
-        case 'initialize': {
-          await this.sendResponse(id, {
-            protocolVersion: '2024-11-05',
-            capabilities: {
-              tools: {},
-            },
-            serverInfo: {
-              name: 'opencode-jupyter',
-              version: '0.1.0',
-            },
-          });
-          break;
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(this.port, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); });
+      });
+      this.phase = 'running';
+      this.timer = setInterval(() => {
+        for (const session of this.connections) {
+          if (Date.now() - session.touched > SESSION_IDLE_MS) { void session.server.close().catch(() => undefined); }
         }
-
-        case 'tools/list': {
-          await this.sendResponse(id, { tools: TOOLS });
-          break;
-        }
-
-        case 'tools/call': {
-          const params = message.params as { name: string; arguments?: Record<string, unknown> } | undefined;
-          if (!params?.name) {
-            throw new Error('Missing tool name');
-          }
-          const result = await this.handleToolCall(params.name, params.arguments);
-          await this.sendResponse(id, result);
-          break;
-        }
-
-        default: {
-          await this.sendError(id, -32601, `Method not found: ${message.method}`);
-        }
-      }
+      }, 60000);
+      this.timer.unref();
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      await this.sendError(id, -32603, msg);
+      this.httpServer = undefined;
+      this.phase = 'stopped';
+      server.close();
+      throw error;
     }
   }
 
-  private async sendResponse(id: string | number | undefined, result: unknown): Promise<void> {
-    if (id === undefined || !this.transport) {
-      return;
-    }
-    await this.transport.send({
-      jsonrpc: '2.0',
-      id,
-      result,
-    });
+  private async stopNow() {
+    if (!this.httpServer) { this.phase = 'stopped'; return; }
+    this.phase = 'stopping';
+    clearInterval(this.timer);
+    const server = this.httpServer;
+    await Promise.allSettled([...this.connections].map(session => session.server.close()));
+    this.sessions.clear();
+    this.connections.clear();
+    await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
+    this.httpServer = undefined;
+    this.phase = 'stopped';
   }
 
-  private async sendError(
-    id: string | number | undefined,
-    code: number,
-    message: string
-  ): Promise<void> {
-    if (id === undefined || !this.transport) {
-      return;
-    }
-    await this.transport.send({
-      jsonrpc: '2.0',
-      id,
-      error: { code, message },
-    });
+  private reply(res: http.ServerResponse, status: number, message: string) {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message } }));
   }
 
-  private async sendNotification(method: string, params: unknown): Promise<void> {
-    if (!this.transport) {
-      return;
-    }
-    await this.transport.send({
-      jsonrpc: '2.0',
-      method,
-      params,
-    });
-  }
-
-  private async handleToolCall(name: string, args: Record<string, unknown> | undefined): Promise<ToolCallResult> {
-    const uri = args?.uri as string | undefined;
-
+  private validHeaders(req: http.IncomingMessage) {
+    const port = new URL(this.getEndpoint()).port;
+    const allowed = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+    if (!req.headers.host || !allowed.has(req.headers.host.toLowerCase())) { return false; }
+    const origin = req.headers.origin;
+    if (origin === undefined) { return true; }
     try {
-      let result: unknown;
+      const parsed = new URL(origin);
+      return parsed.protocol === 'http:' && allowed.has(parsed.host.toLowerCase()) && parsed.origin === origin;
+    } catch { return false; }
+  }
 
-      switch (name) {
-        case 'jupyter_list_open_notebooks': {
-          result = this.jupyterApi.listOpenNotebooks();
-          break;
-        }
-
-        case 'jupyter_get_notebook': {
-          const cells = await this.jupyterApi.getNotebookCells(uri);
-          const metadata = await this.jupyterApi.getNotebookMetadata(uri);
-          result = { cells, metadata };
-          break;
-        }
-
-        case 'jupyter_run_cell': {
-          const index = args?.index as number;
-          if (typeof index !== 'number') {
-            throw new Error('Missing required argument: index');
-          }
-          result = await this.jupyterApi.executeCell(index, uri);
-          break;
-        }
-
-        case 'jupyter_insert_cell': {
-          const idx = args?.index as number;
-          const kind = args?.kind as 'code' | 'markdown';
-          const source = args?.source as string;
-          const language = args?.language as string | undefined;
-          if (typeof idx !== 'number' || !kind || typeof source !== 'string') {
-            throw new Error('Missing required arguments: index, kind, source');
-          }
-          result = await this.jupyterApi.insertCell(idx, kind, source, language, uri);
-          break;
-        }
-
-        case 'jupyter_edit_cell': {
-          const editIndex = args?.index as number;
-          const editSource = args?.source as string;
-          if (typeof editIndex !== 'number' || typeof editSource !== 'string') {
-            throw new Error('Missing required arguments: index, source');
-          }
-          result = await this.jupyterApi.editCell(editIndex, editSource, uri);
-          break;
-        }
-
-        case 'jupyter_get_variables': {
-          result = await this.jupyterApi.getVariables(uri);
-          break;
-        }
-
-        case 'jupyter_get_errors': {
-          result = await this.jupyterApi.getErrorCells(uri);
-          break;
-        }
-
-        case 'jupyter_restart_kernel': {
-          await this.jupyterApi.restartKernel(uri);
-          result = { success: true, message: 'Kernel restarted' };
-          break;
-        }
-
-        case 'jupyter_get_kernel_status': {
-          result = await this.jupyterApi.getKernelStatus(uri);
-          break;
-        }
-
-        default:
-          throw new Error(`Unknown tool: ${name}`);
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ error: message }, null, 2),
-          },
-        ],
-        isError: true,
-      };
+  private async body(req: http.IncomingMessage, res: http.ServerResponse): Promise<unknown> {
+    if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') {
+      this.reply(res, 415, 'Expected application/json.'); return undefined;
     }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    // Non-destroying iterator lets the server send a 413 before closing the connection.
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      size += Buffer.byteLength(chunk);
+      if (size > BODY_LIMIT) {
+        res.setHeader('Connection', 'close');
+        this.reply(res, 413, 'Request exceeds 1 MiB.'); req.resume(); return undefined;
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { this.reply(res, 400, 'Invalid JSON.'); return undefined; }
+  }
+
+  private session(transport: Session['transport']): Session {
+    const server = createToolServer(this.api, this.version);
+    const session = { server, transport, touched: Date.now() };
+    this.connections.add(session);
+    server.onclose = () => {
+      this.connections.delete(session);
+      if (transport.sessionId) { this.sessions.delete(transport.sessionId); }
+    };
+    return session;
+  }
+
+  private async route(req: http.IncomingMessage, res: http.ServerResponse) {
+    if (!this.validHeaders(req)) { this.reply(res, 403, 'Invalid Host or Origin.'); return; }
+    const url = new URL(req.url ?? '/', this.getEndpoint());
+    if (url.pathname !== '/mcp' && url.pathname !== '/sse' && url.pathname !== '/message') {
+      this.reply(res, 404, 'Not found.'); return;
+    }
+    let body: unknown;
+    if (req.method === 'POST') {
+      body = await this.body(req, res);
+      if (res.writableEnded) { return; }
+    }
+    if (this.phase !== 'running') { this.reply(res, 503, 'MCP server is stopping.'); return; }
+    if (url.pathname === '/sse' && req.method === 'GET') {
+      if (this.connections.size >= SESSION_LIMIT) { this.reply(res, 503, 'Too many MCP clients.'); return; }
+      const transport = new SSEServerTransport('/message', res);
+      const session = this.session(transport);
+      this.sessions.set(transport.sessionId, session);
+      try { await session.server.connect(transport); }
+      catch (error) { await session.server.close(); throw error; }
+      return;
+    }
+    if (url.pathname === '/message' && req.method === 'POST') {
+      const session = this.sessions.get(url.searchParams.get('sessionId') ?? '');
+      if (!session || !(session.transport instanceof SSEServerTransport)) { this.reply(res, 404, 'Unknown legacy session.'); return; }
+      session.touched = Date.now();
+      await session.transport.handlePostMessage(req, res, body);
+      return;
+    }
+    if (url.pathname !== '/mcp') { res.setHeader('Allow', url.pathname === '/sse' ? 'GET' : 'POST'); this.reply(res, 405, 'Method not allowed.'); return; }
+    if (!['POST', 'GET', 'DELETE'].includes(req.method ?? '')) {
+      res.setHeader('Allow', 'POST, GET, DELETE'); this.reply(res, 405, 'Method not allowed.'); return;
+    }
+    const id = req.headers['mcp-session-id'];
+    if (id !== undefined) {
+      const session = typeof id === 'string' ? this.sessions.get(id) : undefined;
+      if (!session || !(session.transport instanceof StreamableHTTPServerTransport)) { this.reply(res, 404, 'Unknown MCP session. Reconnect the client.'); return; }
+      session.touched = Date.now();
+      await session.transport.handleRequest(req, res, body);
+      return;
+    }
+    if (req.method !== 'POST' || !isInitializeRequest(body)) {
+      if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); }
+      this.reply(res, req.method === 'POST' ? 400 : 405, 'Initialize a session with POST /mcp first.'); return;
+    }
+    if (this.connections.size >= SESSION_LIMIT) { this.reply(res, 503, 'Too many MCP clients.'); return; }
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID,
+      enableJsonResponse: true, onsessioninitialized: sessionId => { this.sessions.set(sessionId, session); } });
+    const session = this.session(transport);
+    try {
+      await session.server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } finally { if (!transport.sessionId) { await session.server.close(); } }
   }
 }

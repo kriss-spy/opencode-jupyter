@@ -2,7 +2,7 @@
   "name": "opencode-jupyter",
   "displayName": "OpenCode Jupyter",
   "description": "Bridge OpenCode with Jupyter notebooks in VS Code via MCP",
-  "version": "0.1.2",
+  "version": "0.2.1",
   "publisher": "KrisspyWang",
   "license": "MIT",
   "repository": {
@@ -27,17 +27,17 @@
   "activationEvents": [
     "onNotebook:jupyter-notebook"
   ],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "opencode-jupyter.startServer",
-        "title": "Start OpenCode Jupyter MCP Server",
+        "title": "Start MCP Server",
         "category": "OpenCode Jupyter"
       },
       {
         "command": "opencode-jupyter.stopServer",
-        "title": "Stop OpenCode Jupyter MCP Server",
+        "title": "Stop MCP Server",
         "category": "OpenCode Jupyter"
       },
       {
@@ -50,14 +50,23 @@
       "title": "OpenCode Jupyter",
       "properties": {
         "opencode-jupyter.mcpPort": {
-          "type": "number",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
           "default": 9123,
-          "description": "Port for the local MCP HTTP server"
+          "description": "Loopback MCP port on the VS Code workspace host. Restart the server after changing it."
         },
         "opencode-jupyter.autoStartServer": {
           "type": "boolean",
           "default": true,
           "description": "Automatically start the MCP server when a notebook is opened"
+        },
+        "opencode-jupyter.executionTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000,
+          "default": 30000,
+          "description": "Maximum time to wait for a fresh cell execution result. Timeout does not interrupt the kernel. Set the MCP client execution timeout higher than this value."
         }
       }
     }
@@ -66,18 +75,35 @@
     "ms-toolsai.jupyter"
   ],
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "watch": "node scripts/build.cjs --watch",
+    "lint": "eslint src --ext ts",
+    "build": "npm run compile && node scripts/build.cjs",
+    "test": "npm run compile && node --test test/*.test.cjs",
+    "check": "npm run lint && npm test && npm run build",
+    "package": "vsce package --no-dependencies --out artifacts/opencode-jupyter-0.2.1.vsix",
+    "test:host": "npm run build && node test/run-host.cjs",
+    "test:opencode": "npm run compile && node scripts/verify-opencode.cjs",
+    "verify:package": "node scripts/verify-package.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "1.90.0",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",
-    "@vscode/vsce": "^2.15.0",
+    "@vscode/test-electron": "2.5.2",
+    "@vscode/vsce": "3.6.2",
+    "esbuild": "0.25.12",
     "eslint": "^8.57.0",
+    "mock-require": "3.0.3",
     "typescript": "^5.4.5"
-  }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "extensionKind": [
+    "workspace"
+  ]
 }
